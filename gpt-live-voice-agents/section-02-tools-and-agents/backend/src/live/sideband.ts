@@ -1,6 +1,8 @@
 import WebSocket from "ws"
 
 import { executeTool } from "../tools/execute-tool"
+import type { RuntimeContext } from "../runtime/action-runtime";
+import type { Run } from "openai/resources/beta/threads.js";
 
 const connections = new Map<
     string,
@@ -8,7 +10,8 @@ const connections = new Map<
 >()
 
 export function connectSideband(
-    sessionId: string
+    sessionId: string,
+    runtimeContext: RuntimeContext
 ) {
     return new Promise<WebSocket>(
         (resolve, reject) => {
@@ -57,7 +60,8 @@ export function connectSideband(
 
                     await handleSidebandEvent(
                         ws,
-                        event
+                        event,
+                        runtimeContext
                     )
                 } catch (error) {
                     console.error(
@@ -72,18 +76,29 @@ export function connectSideband(
 
 async function handleSidebandEvent(
     ws: WebSocket,
-    event: any
+    event: any,
+    runtimeContext: RuntimeContext
 ) {
     console.log(
         "Sideband event:",
         event.type
     )
 
+    if (event.type === "error") {
+        console.error("Sideband API error:", event.error)
+        return
+    }
+
     if (event.type !== "response.event") {
         return
     }
 
     const responseEvent = event.event
+
+    if (responseEvent.type === "response.failed") {
+        console.error("Delegated response failed:", responseEvent.response?.error)
+        return
+    }
 
     if (
         responseEvent.type !==
@@ -114,8 +129,9 @@ async function handleSidebandEvent(
 
     const result = await executeTool(
         item.name,
-        args
-    )
+        args,
+        runtimeContext
+    );
 
     console.log(
         "Tool result:",

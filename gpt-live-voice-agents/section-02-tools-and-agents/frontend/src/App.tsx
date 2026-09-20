@@ -113,8 +113,6 @@ function App() {
           console.log(`Assistant: ${data.delta}`)
         }
 
-
-
         if (
           data.type === "session.started"
         ) {

@@ -35,6 +35,8 @@ export const changeOrderAddressTool = {
 
                     line2: {
                         type: "string",
+                        description:
+                            "Apartment, suite, or other second address line. Use an empty string when not applicable.",
                     },
 
                     city: {
@@ -56,6 +58,7 @@ export const changeOrderAddressTool = {
 
                 required: [
                     "line1",
+                    "line2",
                     "city",
                     "state",
                     "postalCode",

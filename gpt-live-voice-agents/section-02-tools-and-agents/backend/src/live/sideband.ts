@@ -2,7 +2,6 @@ import WebSocket from "ws"
 
 import { executeTool } from "../tools/execute-tool"
 import type { RuntimeContext } from "../runtime/action-runtime";
-import type { Run } from "openai/resources/beta/threads.js";
 
 const connections = new Map<
     string,

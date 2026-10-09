@@ -4,8 +4,15 @@ import { WebSocketServer } from "ws"
 import OpenAI from "openai"
 import { LiveWS } from "openai/resources/live/ws"
 
-import { getOrder, getOrderTool } from "./tools/get-order"
-import type { ResponseOutputItem } from "openai/resources/responses/responses.js"
+import { getOrderTool } from "./tools/get-order"
+import type { ResponseOutputItem } from "openai/resources/responses/responses"
+
+import { handleSidebandEvent } from "./sideband/index"
+import { getShipmentTool } from "./tools/get-shipment";
+import { searchProductsTool } from "./tools/search-products";
+import { getReturnStatusTool } from "./tools/get-return-status";
+import { requestReturnTool } from "./tools/request-return";
+import { changeOrderAddressTool } from "./tools/change-order-address";
 
 const PORT = Number(process.env.PORT ?? 3000)
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL!
@@ -78,31 +85,6 @@ function findCustomerByPhone(
         (customer) =>
             customer.phone === phone
     )
-}
-
-type GetOrderArgs = {
-    orderId: string
-}
-
-function parseGetOrderArgs(
-    raw: string
-): GetOrderArgs {
-    const value: unknown = JSON.parse(raw)
-
-    if (
-        typeof value !== "object" ||
-        value === null ||
-        !("orderId" in value) ||
-        typeof value.orderId !== "string"
-    ) {
-        throw new Error(
-            "Invalid get_order arguments"
-        )
-    }
-
-    return {
-        orderId: value.orderId,
-    }
 }
 
 wss.on("connection", (twilioWs) => {
@@ -190,7 +172,13 @@ For requests requiring verified business information, delegate to the backend.
                                 - returns
                                 - customer-specific information`,
 
-                            tools: [getOrderTool],
+                            tools: [getOrderTool,
+                                getShipmentTool,
+                                searchProductsTool,
+                                getReturnStatusTool,
+                                requestReturnTool,
+                                changeOrderAddressTool
+                            ],
 
                             tool_choice: "auto",
 
@@ -201,7 +189,7 @@ For requests requiring verified business information, delegate to the backend.
             })
         })
 
-        live.on("event", (event) => {
+        live.on("event", async (event) => {
             if (event.type === "session.started") {
                 console.log(
                     "GPT-Live session started:",
@@ -244,28 +232,29 @@ For requests requiring verified business information, delegate to the backend.
                     if (item.type !== "function_call") return
                     console.log(event.event_id)
                     console.log(JSON.stringify(event.event))
-                    const { name, arguments: rawArguments, call_id } = item
+                    const { name, arguments: rawArguments, call_id: callId } = item
                     const args = JSON.parse(rawArguments)
 
                     console.log("Function:", name)
                     console.log("Arguments:", args)
-                    console.log("Call ID:", call_id)
+                    console.log("Call ID:", callId)
                     console.log(callContext)
 
-                    let output
+                    try {
 
-                    if (name === "get_order") {
-                        const inputArguments = parseGetOrderArgs(rawArguments)
-                        output = JSON.stringify(getOrder(inputArguments.orderId))
+                        await handleSidebandEvent(
+                            live,
+                            { functionArgs: rawArguments, functionName: name, callId: callId, eventId: event.event_id },
+                            { customerId: callContext.customerId }
+                        )
+
+                    } catch (error) {
+                        console.error(
+                            "Sideband message error:",
+                            error
+                        )
                     }
 
-                    if (!output) {
-                        output = "I am unable to help you with this request."
-                    }
-
-                    live.send({ type: "response.item.create", item: { type: "function_call_output", call_id: call_id, output: output, status: "completed" }, event_id: event.event_id })
-
-                    live.send({ type: "response.create" })
                 }
             }
 

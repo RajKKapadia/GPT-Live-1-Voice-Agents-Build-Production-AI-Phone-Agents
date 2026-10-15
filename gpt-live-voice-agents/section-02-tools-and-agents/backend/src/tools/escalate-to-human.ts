@@ -8,26 +8,26 @@ import {
 } from "../data/store";
 
 type CreateEscalationArgs = {
-    context: RuntimeContext;
+    runContext: RuntimeContext;
     reason: string;
     conversationSummary: string;
     problemDescription: string;
 };
 
 export async function createEscalation({
-    context,
+    runContext,
     reason,
     conversationSummary,
     problemDescription,
 }: CreateEscalationArgs) {
     const customer =
         findCustomerById(
-            context.customerId
+            runContext.customerId
         );
 
     const attemptedActions =
         getActionLog(
-            context.sessionId
+            runContext.sessionId
         );
 
     const escalation = {
@@ -49,7 +49,7 @@ export async function createEscalation({
                     customer.tier,
             }
             : {
-                id: context.customerId,
+                id: runContext.customerId,
             },
 
         reason,

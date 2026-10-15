@@ -139,7 +139,7 @@ const server = Bun.serve({
                         delegation: {
                             type: "responses",
                             responses: {
-                                model: "gpt-5.6-luna",
+                                model: "gpt-6-luna",
                                 instructions: `You are the backend customer support agent for Orbit Supply.
 
                                 Your job is to reason about customer requests, retrieve verified Orbit Supply business data using the available tools, and return accurate results to the Live voice agent.

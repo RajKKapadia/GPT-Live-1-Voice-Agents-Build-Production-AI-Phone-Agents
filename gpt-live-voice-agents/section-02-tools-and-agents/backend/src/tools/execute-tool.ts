@@ -18,6 +18,7 @@ import {
 import { runSpecialist } from "../agents/specialists";
 import { createEscalation } from "./escalate-to-human";
 import type { Address } from "../data/types";
+import type { OpenAI } from "openai";
 
 const SENSITIVE_TOOLS = new Set([
     "request_return",
@@ -343,25 +344,23 @@ async function executeRawTool(
 // }
 
 export async function executeTool(
-    name: string,
-    args: Record<string, unknown>,
-    context: RuntimeContext
+    item: OpenAI.Responses.ResponseFunctionToolCall,
+    runContext: RuntimeContext
 ): Promise<ToolResult> {
+    const name = item.name
     if (name === "confirm_action") {
-        const confirmationId =
-            args.confirmationId as string;
+        const args = JSON.parse(item.arguments) as { confirmationId: string }
 
         try {
-            const pending =
-                consumePendingAction(
-                    confirmationId,
-                    context.sessionId
-                );
+            const pending = consumePendingAction(
+                args.confirmationId,
+                runContext.sessionId
+            );
 
             return await executeRawTool(
                 pending.toolName,
                 pending.args,
-                context
+                runContext
             );
         } catch (error) {
             const toolError =
@@ -386,20 +385,10 @@ export async function executeTool(
     }
 
     if (name === "delegate_to_specialist") {
-        const result = await runSpecialist({
-            specialist: args.specialist as
-                | "order"
-                | "refund"
-                | "product",
+        const args = JSON.parse(item.arguments) as { specialist: "order" | "refund" | "product", task: string, context: string }
+        const result = await runSpecialist(args);
 
-            task: args.task as string,
-
-            context:
-                (args.context as string | undefined) ??
-                "",
-        });
-
-        logAction(context.sessionId, {
+        logAction(runContext.sessionId, {
             toolName: `specialist:${args.specialist}`,
             status: "delegated",
         });
@@ -411,20 +400,19 @@ export async function executeTool(
     }
 
     if (name === "escalate_to_human") {
+        const args = JSON.parse(item.arguments) as { reason: string, conversationSummary: string, problemDescription: string }
         const escalation =
             await createEscalation({
-                context,
+                runContext,
 
-                reason: args.reason as string,
+                reason: args.reason,
 
-                conversationSummary:
-                    args.conversationSummary as string,
+                conversationSummary: args.conversationSummary,
 
-                problemDescription:
-                    args.problemDescription as string,
+                problemDescription: args.problemDescription
             });
 
-        logAction(context.sessionId, {
+        logAction(runContext.sessionId, {
             toolName: "human_escalation",
             status: "escalated",
             details: escalation.caseId,
@@ -441,18 +429,17 @@ export async function executeTool(
     }
 
     if (SENSITIVE_TOOLS.has(name)) {
-        const description =
-            describeSensitiveAction(name, args);
+        const args = JSON.parse(item.arguments)
+        const description = describeSensitiveAction(name, args);
 
-        const confirmationId =
-            createPendingAction(
-                context.sessionId,
-                name,
-                args,
-                description
-            );
+        const confirmationId = createPendingAction(
+            runContext.sessionId,
+            name,
+            args,
+            description
+        );
 
-        logAction(context.sessionId, {
+        logAction(runContext.sessionId, {
             toolName: name,
             status: "confirmation_required",
             details: description,
@@ -465,9 +452,11 @@ export async function executeTool(
         };
     }
 
+    const args = JSON.parse(item.arguments)
+
     return executeRawTool(
         name,
         args,
-        context
+        runContext
     );
 }

@@ -78,7 +78,7 @@ export async function runSpecialist({
         await openai.responses.create({
             model:
                 process.env.SPECIALIST_MODEL ??
-                "gpt-5.6-luna",
+                "gpt-6-luna",
 
             reasoning: {
                 effort: "low",

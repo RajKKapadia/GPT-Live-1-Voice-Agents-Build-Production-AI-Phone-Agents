@@ -2,6 +2,7 @@ import WebSocket from "ws"
 
 import { executeTool } from "../tools/execute-tool"
 import type { RuntimeContext } from "../runtime/action-runtime";
+import type { OpenAI } from "openai";
 
 const connections = new Map<
     string,
@@ -51,17 +52,10 @@ export function connectSideband(
                 connections.delete(sessionId)
             })
 
-            ws.on("message", async (raw) => {
+            ws.on("message", async (rawEvent) => {
                 try {
-                    const event = JSON.parse(
-                        raw.toString()
-                    )
-
-                    await handleSidebandEvent(
-                        ws,
-                        event,
-                        runtimeContext
-                    )
+                    const responseEvent = JSON.parse(rawEvent.toString()) as OpenAI.Live.ResponseEvent
+                    await handleSidebandEvent(ws, responseEvent, runtimeContext)
                 } catch (error) {
                     console.error(
                         "Sideband message error:",
@@ -75,93 +69,52 @@ export function connectSideband(
 
 async function handleSidebandEvent(
     ws: WebSocket,
-    event: any,
+    responseEvent: OpenAI.Live.ResponseEvent,
     runtimeContext: RuntimeContext
 ) {
-    console.log(
-        "Sideband event:",
-        event.type
-    )
+    if (responseEvent.type === "response.event") {
+        const event = responseEvent.event
 
-    if (event.type === "error") {
-        console.error("Sideband API error:", event.error)
-        return
+        if (event.type === "response.output_item.done") {
+
+            const item = event.item as OpenAI.Responses.ResponseOutputItem
+
+            if (item.type === "function_call") {
+
+                if (item.status === "completed") {
+
+                    /**
+                     * TODOs
+                     * Call the actual tool
+                     * Submit the response
+                     */
+                    const toolResult = await executeTool(item, runtimeContext)
+
+                    sendToolResult(ws, responseEvent.event_id, item.call_id, JSON.stringify(toolResult))
+                }
+            }
+        }
     }
-
-    if (event.type !== "response.event") {
-        return
-    }
-
-    const responseEvent = event.event
-
-    if (responseEvent.type === "response.failed") {
-        console.error("Delegated response failed:", responseEvent.response?.error)
-        return
-    }
-
-    if (
-        responseEvent.type !==
-        "response.output_item.done"
-    ) {
-        return
-    }
-
-    const item = responseEvent.item
-
-    if (item.type !== "function_call") {
-        return
-    }
-
-    console.log(
-        "Function call:",
-        item.name
-    )
-
-    console.log(
-        "Arguments:",
-        item.arguments
-    )
-
-    const args = item.arguments
-        ? JSON.parse(item.arguments)
-        : {}
-
-    const result = await executeTool(
-        item.name,
-        args,
-        runtimeContext
-    );
-
-    console.log(
-        "Tool result:",
-        result
-    )
-
-    sendToolResult(
-        ws,
-        item.call_id,
-        result
-    )
 }
 
 function sendToolResult(
     ws: WebSocket,
     callId: string,
-    result: unknown
+    eventId: string,
+    output: string
 ) {
     ws.send(
         JSON.stringify({
             type: "response.item.create",
 
-            event_id:
-                `tool_${crypto.randomUUID()}`,
+            event_id: eventId,
 
             item: {
                 type: "function_call_output",
 
                 call_id: callId,
 
-                output: JSON.stringify(result),
+                output: output,
             },
         })
     )
@@ -170,8 +123,7 @@ function sendToolResult(
         JSON.stringify({
             type: "response.create",
 
-            event_id:
-                `continue_${crypto.randomUUID()}`,
+            event_id: eventId,
         })
     )
 }

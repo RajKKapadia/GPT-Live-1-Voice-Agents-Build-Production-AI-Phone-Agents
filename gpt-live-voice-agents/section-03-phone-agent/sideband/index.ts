@@ -1,47 +1,42 @@
 import { LiveWS } from "openai/resources/live/ws"
 import { executeTool } from "../tools/execute-tool"
+import type { OpenAI } from "openai"
+import type { RuntimeContext } from "../runtime/action-runtime"
 
-export type RuntimeContext = {
-    customerId: string
-}
-
-export type EventData = {
-
-}
 
 export async function handleSidebandEvent(
-    live: LiveWS,
-    data: {
-        functionName: string
-        functionArgs: string
-        callId: string
-        eventId: string
-    },
+    liveWs: LiveWS,
+    responseEvent: OpenAI.Live.ResponseEvent,
     runtimeContext: RuntimeContext
 ) {
 
-    const result = await executeTool(data.functionName, data.functionArgs)
+    if (responseEvent.type === "response.event") {
+        const event = responseEvent.event
 
-    console.log(
-        "Tool result:",
-        JSON.stringify(result)
-    )
+        if (event.type === "response.output_item.done") {
 
-    sendToolResult(
-        live,
-        data.callId,
-        JSON.stringify(result),
-        data.eventId
-    )
+            const item = event.item as OpenAI.Responses.ResponseOutputItem
+
+            if (item.type === "function_call") {
+
+                if (item.status === "completed") {
+
+                    const toolResult = await executeTool(item, runtimeContext)
+
+                    sendToolResult(liveWs, responseEvent.event_id, item.call_id, JSON.stringify(toolResult))
+                }
+            }
+        }
+    }
 }
 
 function sendToolResult(
-    live: LiveWS,
+    liveWs: LiveWS,
+    eventId: string,
     callId: string,
     result: string,
-    eventId: string
 ) {
-    live.send({
+    liveWs.send({
         type: "response.item.create",
         item: {
             type: "function_call_output",
@@ -52,5 +47,5 @@ function sendToolResult(
         event_id: eventId
     })
 
-    live.send({ type: "response.create" })
+    liveWs.send({ type: "response.create", event_id: eventId })
 }

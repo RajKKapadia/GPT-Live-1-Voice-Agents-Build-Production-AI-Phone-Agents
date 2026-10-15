@@ -5,7 +5,6 @@ import OpenAI from "openai"
 import { LiveWS } from "openai/resources/live/ws"
 
 import { getOrderTool } from "./tools/get-order"
-import type { ResponseOutputItem } from "openai/resources/responses/responses"
 
 import { handleSidebandEvent } from "./sideband/index"
 import { getShipmentTool } from "./tools/get-shipment";
@@ -13,6 +12,9 @@ import { searchProductsTool } from "./tools/search-products";
 import { getReturnStatusTool } from "./tools/get-return-status";
 import { requestReturnTool } from "./tools/request-return";
 import { changeOrderAddressTool } from "./tools/change-order-address";
+import { confirmActionTool } from "./tools/confirm-action";
+import { delegateToSpecialistTool } from "./tools/delegate-to-specialist";
+import { escalateToHumanTool } from "./tools/escalate-to-human";
 
 const PORT = Number(process.env.PORT ?? 3000)
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL!
@@ -28,7 +30,7 @@ const wss = new WebSocketServer({
     path: "/media-stream",
 })
 
-const openai = new OpenAI({
+const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 })
 
@@ -48,7 +50,7 @@ const customers = [
 
 export type CallContext = {
     callSid: string
-    streamSid?: string
+    streamSid: string
     liveSessionId?: string
     callerNumber?: string
     customerId: string
@@ -93,35 +95,44 @@ wss.on("connection", (twilioWs) => {
 
     let streamSid: string
 
-    let live: LiveWS
-    let liveStarted = false
+    let liveWs = new LiveWS(client)
+    let liveWsStarted = false
 
     const pendingAudio: string[] = []
 
     function connectToOpenAI(callContext: CallContext) {
 
-        console.log("Connection to openai")
+        console.log("Connecting to openai")
 
-        const instructions = `
-You are the Orbit Supply customer
-support phone agent.
+        const instructions = `You are the voice customer support agent for Orbit Supply.
 
-Speak naturally, concisely and always use customer name to address them.
+                        Speak naturally and concisely with the customer.
 
-Caller Name: ${callContext.customerName}
+                        When the customer's request requires Orbit Supply business data,
+                        backend reasoning, or a business action, delegate the request to
+                        the Responses backend.
 
-Customer ID: ${callContext.customerId}
+                        Examples include:
+                        - checking an order
+                        - checking shipment status
+                        - searching inventory
+                        - checking a return
+                        - requesting a return
+                        - changing an address
 
-If the caller interrupts you, stop speaking and listen.
+                        Do not invent business information.
 
-For requests requiring verified business information, delegate to the backend.
-`
+                        For ordinary conversational questions that do not require business
+                        data, respond directly.
 
-        live = new LiveWS(openai)
+                        When the backend reports confirmation_required:
+                        - explain the exact action
+                        - ask for explicit confirmation
+                        - only after confirmation should the action continue`
 
-        live.socket.on("open", () => {
+        liveWs.socket.on("open", () => {
             console.log("Connected to GPT-Live-1")
-            live!.send({
+            liveWs.send({
                 type: "session.start",
 
                 session: {
@@ -157,7 +168,7 @@ For requests requiring verified business information, delegate to the backend.
                         type: "responses",
 
                         responses: {
-                            model: "gpt-5.6-luna",
+                            model: "gpt-6-luna",
 
                             instructions: `You are the backend customer support agent for Orbit Supply.
 
@@ -170,14 +181,120 @@ For requests requiring verified business information, delegate to the backend.
                                 - shipments
                                 - products
                                 - returns
-                                - customer-specific information`,
+                                - customer-specific information
 
-                            tools: [getOrderTool,
+                                For example:
+                                - use get_order for order details or order status
+                                - use get_shipment for shipping or delivery information
+                                - use search_products for product searches
+                                - use get_return_status for existing return requests
+
+                                READ-ONLY TOOLS
+
+                                Read-only tools may be used immediately whenever they are needed to answer the customer's request.
+
+                                Always prefer verified tool data over assumptions or conversation memory.
+
+                                SENSITIVE WRITE OPERATIONS
+
+                                Sensitive write operations may return:
+
+                                "confirmation_required"
+
+                                When this happens:
+
+                                1. Do not perform the action yet.
+                                2. Return a clear explanation of the exact action requiring confirmation.
+                                3. Allow the Live agent to ask the customer for explicit confirmation.
+                                4. Do not call confirm_action until explicit customer confirmation has been provided.
+                                5. Never treat silence, unrelated statements, or ambiguous language as confirmation.
+
+                                Do not report that a sensitive action succeeded until confirm_action returns a successful result.
+
+                                TOOL FAILURES
+
+                                Never expose:
+                                - raw backend errors
+                                - stack traces
+                                - internal error codes
+                                - JSON implementation details
+                                - HTTP errors
+                                - database errors
+                                - internal system details
+
+                                Use the human-readable message returned by the tool.
+
+                                For retryable errors:
+                                - briefly explain the problem
+                                - retry at most once when reasonable
+
+                                If a tool repeatedly fails or returns escalationRecommended=true, use escalate_to_human.
+
+                                For non-retryable errors:
+                                - explain the problem conversationally
+                                - request corrected information when appropriate
+
+                                SPECIALISTS
+
+                                Use delegate_to_specialist only when the request benefits from deeper domain-specific reasoning.
+
+                                Available specialists:
+                                - order
+                                - refund
+                                - product
+
+                                Specialists provide recommendations or analysis.
+
+                                You remain responsible for using the appropriate business tools and returning verified information.
+
+                                Do not delegate simple lookups to a specialist when a direct tool can answer the request.
+
+                                Examples:
+                                - "What is the status of order ORD-1001?" → use get_order
+                                - "Where is ORD-1001?" → use get_shipment
+                                - "Do you have wireless keyboards in stock?" → use search_products
+                                - "What is happening with my return for ORD-1001?" → use get_return_status
+
+                                HUMAN ESCALATION
+
+                                Use escalate_to_human when:
+                                - the customer explicitly requests a human
+                                - the requested action cannot be performed with the available permissions or tools
+                                - a tool repeatedly fails
+                                - escalationRecommended=true
+                                - the issue is too sensitive or complex to resolve safely
+
+                                Provide:
+                                - a concise summary of the conversation
+                                - the unresolved problem
+                                - any relevant verified information already collected
+
+                                Do not claim that the customer has been transferred unless escalate_to_human succeeds.
+
+                                GENERAL RULES
+
+                                Do not invent:
+                                - order status
+                                - shipment status
+                                - delivery dates
+                                - tracking numbers
+                                - product availability
+                                - return status
+                                - customer information
+                                - action results
+
+                                When business data is required, call the appropriate tool before answering.`,
+
+                            tools: [
+                                getOrderTool,
                                 getShipmentTool,
                                 searchProductsTool,
                                 getReturnStatusTool,
                                 requestReturnTool,
-                                changeOrderAddressTool
+                                changeOrderAddressTool,
+                                confirmActionTool,
+                                delegateToSpecialistTool,
+                                escalateToHumanTool,
                             ],
 
                             tool_choice: "auto",
@@ -189,21 +306,19 @@ For requests requiring verified business information, delegate to the backend.
             })
         })
 
-        live.on("event", async (event) => {
+        liveWs.on("event", async (event) => {
             if (event.type === "session.started") {
-                console.log(
-                    "GPT-Live session started:",
-                    event.session.id
-                )
-
-                liveStarted = true
+                console.log("GPT-Live session started:", event.session.id)
 
                 for (const audio of pendingAudio) {
-                    live!.send({
+                    liveWs.send({
                         type: "session.input_audio.append",
                         audio,
                     })
                 }
+
+                liveWsStarted = true
+                callContext.liveSessionId = event.session.id
 
                 pendingAudio.length = 0
             }
@@ -225,36 +340,13 @@ For requests requiring verified business information, delegate to the backend.
             }
 
             if (event.type === "response.event") {
-
-                if (event.event?.type == "response.output_item.done") {
-                    // Handle Function call
-                    const item = event.event.item as ResponseOutputItem
-                    if (item.type !== "function_call") return
-                    console.log(event.event_id)
-                    console.log(JSON.stringify(event.event))
-                    const { name, arguments: rawArguments, call_id: callId } = item
-                    const args = JSON.parse(rawArguments)
-
-                    console.log("Function:", name)
-                    console.log("Arguments:", args)
-                    console.log("Call ID:", callId)
-                    console.log(callContext)
-
-                    try {
-
-                        await handleSidebandEvent(
-                            live,
-                            { functionArgs: rawArguments, functionName: name, callId: callId, eventId: event.event_id },
-                            { customerId: callContext.customerId }
-                        )
-
-                    } catch (error) {
-                        console.error(
-                            "Sideband message error:",
-                            error
-                        )
-                    }
-
+                try {
+                    await handleSidebandEvent(liveWs, event, { customerId: callContext.customerId, sessionId: callContext.liveSessionId as string })
+                } catch (error) {
+                    console.error(
+                        "Sideband message error:",
+                        error
+                    )
                 }
             }
 
@@ -268,6 +360,10 @@ For requests requiring verified business information, delegate to the backend.
             if (event.type === "session.closed") {
                 console.log("GPT-Live session closed")
             }
+        })
+
+        liveWs.on("error", (error) => {
+            console.log(`Error on OpenAI Websocket: ${error.message}`)
         })
     }
 
@@ -297,37 +393,30 @@ For requests requiring verified business information, delegate to the backend.
                 customerName: params.customerName || "Unknown",
             }
 
-            console.log(
-                "Call context:",
-                callContext
-            )
+            console.log("Call context:", callContext)
 
-            console.log(
-                "Twilio stream started:",
-                streamSid
-            )
+            console.log("Twilio stream started:", streamSid)
 
             connectToOpenAI(callContext)
         }
 
         if (event.event === "media") {
-            const audio = event.media.payload
 
-            if (liveStarted && live) {
-                live.send({
+            if (liveWsStarted && streamSid) {
+                liveWs.send({
                     type: "session.input_audio.append",
-                    audio,
+                    audio: event.media.payload,
                 })
             } else {
-                pendingAudio.push(audio)
+                pendingAudio.push(event.media.payload)
             }
         }
 
         if (event.event === "stop") {
             console.log("Twilio stream stopped")
 
-            if (live) {
-                live.send({
+            if (liveWs) {
+                liveWs.send({
                     type: "session.close",
                 })
             }
@@ -339,6 +428,10 @@ For requests requiring verified business information, delegate to the backend.
             "Twilio WebSocket disconnected"
         )
     })
+})
+
+app.get("/", (req, res) => {
+    res.status(200).json({ message: "Okay" })
 })
 
 app.post("/voice/incoming", (req, res) => {

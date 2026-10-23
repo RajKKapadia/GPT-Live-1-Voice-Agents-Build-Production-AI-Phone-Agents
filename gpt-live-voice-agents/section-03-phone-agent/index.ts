@@ -1,110 +1,112 @@
-import express from "express"
-import { createServer } from "node:http"
-import { WebSocketServer } from "ws"
 import OpenAI from "openai"
-import { LiveWS } from "openai/resources/live/ws"
 
-import { getOrderTool } from "./tools/get-order"
+import { store, findOrderById } from "./data/store"
+import {
+    getOrderTool,
+} from "./tools/get-order";
 
-import { handleSidebandEvent } from "./sideband/index"
-import { getShipmentTool } from "./tools/get-shipment";
-import { searchProductsTool } from "./tools/search-products";
-import { getReturnStatusTool } from "./tools/get-return-status";
-import { requestReturnTool } from "./tools/request-return";
-import { changeOrderAddressTool } from "./tools/change-order-address";
-import { confirmActionTool } from "./tools/confirm-action";
-import { delegateToSpecialistTool } from "./tools/delegate-to-specialist";
-import { escalateToHumanTool } from "./tools/escalate-to-human";
+import {
+    getShipmentTool,
+} from "./tools/get-shipment";
 
-const PORT = Number(process.env.PORT ?? 3000)
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL!
+import {
+    searchProductsTool,
+} from "./tools/search-products";
 
-const app = express()
+import {
+    getReturnStatusTool,
+} from "./tools/get-return-status";
 
-app.use(express.urlencoded({ extended: false }))
+import {
+    requestReturnTool,
+} from "./tools/request-return";
 
-const server = createServer(app)
+import {
+    changeOrderAddressTool,
+} from "./tools/change-order-address";
+import {
+    connectSideband,
+} from "./sideband/index"
 
-const wss = new WebSocketServer({
-    server,
-    path: "/media-stream",
-})
+import {
+    confirmActionTool,
+} from "./tools/confirm-action";
 
-const client = new OpenAI({
+import {
+    delegateToSpecialistTool,
+} from "./tools/delegate-to-specialist";
+
+import {
+    escalateToHumanTool,
+} from "./tools/escalate-to-human";
+
+if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is required")
+}
+
+const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 })
 
-const customers = [
-    {
-        id: "CUS-1001",
-        name: "Alex Johnson",
-        phone: "+91123456789",
-    },
+const server = Bun.serve({
+    port: 3000,
 
-    {
-        id: "CUS-1002",
-        name: "Sarah Williams",
-        phone: "+1234567890",
-    },
-]
+    async fetch(request) {
+        const url = new URL(request.url)
 
-export type CallContext = {
-    callSid: string
-    streamSid: string
-    liveSessionId?: string
-    callerNumber?: string
-    customerId: string
-    customerName: string
-}
-
-type TwilioEvent =
-    | {
-        event: "connected"
-    }
-    | {
-        event: "start"
-        start: {
-            streamSid: string
-            callSid: string
-            customParameters?: Record<string, string>
+        if (url.pathname === "/health") {
+            return Response.json({
+                status: "ok",
+            })
         }
-    }
-    | {
-        event: "media"
-        media: {
-            payload: string
+
+        if (request.method === "GET" && url.pathname === "/api/debug/orders") {
+            console.log("I am gere")
+            return Response.json(store.orders)
         }
-    }
-    | {
-        event: "stop"
-    }
 
+        if (request.method === "GET" && url.pathname.startsWith("/api/debug/orders/")) {
+            const orderId = url.pathname.split("/").at(-1)
 
-function findCustomerByPhone(
-    phone: string
-) {
-    return customers.find(
-        (customer) =>
-            customer.phone === phone
-    )
-}
+            console.log(orderId)
 
-wss.on("connection", (twilioWs) => {
+            if (!orderId) {
+                return Response.json({ error: "Order ID is required" }, { status: 404 })
+            }
 
-    console.log("Twilio WebSocket connected")
+            const order = findOrderById(orderId)
 
-    let streamSid: string
+            if (!order) {
+                return Response.json({ error: "Order not found" }, { status: 404 })
+            }
 
-    let liveWs = new LiveWS(client)
-    let liveWsStarted = false
+            return Response.json(order, { status: 200 })
+        }
 
-    const pendingAudio: string[] = []
+        if (
+            request.method === "POST" &&
+            url.pathname === "/api/session"
+        ) {
+            const body = (await request.json()) as {
+                sdp?: string
+            }
 
-    function connectToOpenAI(callContext: CallContext) {
+            if (!body.sdp) {
+                return Response.json(
+                    {
+                        error: "SDP is required",
+                    },
+                    {
+                        status: 400,
+                    }
+                )
+            }
 
-        console.log("Connecting to openai")
-
-        const instructions = `You are the voice customer support agent for Orbit Supply.
+            try {
+                const result = await openai.live.create({
+                    session: {
+                        model: "gpt-live-1",
+                        instructions: `You are the voice customer support agent for Orbit Supply.
 
                         Speak naturally and concisely with the customer.
 
@@ -128,49 +130,17 @@ wss.on("connection", (twilioWs) => {
                         When the backend reports confirmation_required:
                         - explain the exact action
                         - ask for explicit confirmation
-                        - only after confirmation should the action continue`
-
-        liveWs.socket.on("open", () => {
-            console.log("Connected to GPT-Live-1")
-            liveWs.send({
-                type: "session.start",
-
-                session: {
-                    input: [
-                        {
-                            role: "developer",
-                            type: "message",
-                            content: [
-                                {
-                                    type: "input_text",
-                                    text: JSON.stringify(callContext)
-                                }
-                            ]
-                        }
-                    ],
-
-                    model: "gpt-live-1",
-
-                    instructions: instructions,
-
-                    audio: {
-                        format: {
-                            type: "audio/pcmu",
-                            rate: 8000,
+                        - only after confirmation should the action continue`,
+                        audio: {
+                            output: {
+                                voice: "marin"
+                            }
                         },
-
-                        output: {
-                            voice: "marin",
-                        },
-                    },
-
-                    delegation: {
-                        type: "responses",
-
-                        responses: {
-                            model: "gpt-6-luna",
-
-                            instructions: `You are the backend customer support agent for Orbit Supply.
+                        delegation: {
+                            type: "responses",
+                            responses: {
+                                model: "gpt-6-luna",
+                                instructions: `You are the backend customer support agent for Orbit Supply.
 
                                 Your job is to reason about customer requests, retrieve verified Orbit Supply business data using the available tools, and return accurate results to the Live voice agent.
 
@@ -284,236 +254,51 @@ wss.on("connection", (twilioWs) => {
                                 - action results
 
                                 When business data is required, call the appropriate tool before answering.`,
-
-                            tools: [
-                                getOrderTool,
-                                getShipmentTool,
-                                searchProductsTool,
-                                getReturnStatusTool,
-                                requestReturnTool,
-                                changeOrderAddressTool,
-                                confirmActionTool,
-                                delegateToSpecialistTool,
-                                escalateToHumanTool,
-                            ],
-
-                            tool_choice: "auto",
-
-                            parallel_tool_calls: true
+                                tools: [
+                                    getOrderTool,
+                                    getShipmentTool,
+                                    searchProductsTool,
+                                    getReturnStatusTool,
+                                    requestReturnTool,
+                                    changeOrderAddressTool,
+                                    confirmActionTool,
+                                    delegateToSpecialistTool,
+                                    escalateToHumanTool,
+                                ],
+                                tool_choice: "auto",
+                                parallel_tool_calls: false
+                            }
                         }
+                    },
+                    transport: {
+                        type: "webrtc",
+                        sdp: body.sdp,
+                    },
+                })
+
+                await connectSideband(result.session.id, { customerId: "CUS-1001", sessionId: result.session.id })
+
+                return Response.json(result, {
+                    status: 201,
+                })
+            } catch (error) {
+                console.error(error)
+
+                return Response.json(
+                    {
+                        error: "Failed to create session",
+                    },
+                    {
+                        status: 500,
                     }
-                },
-            })
-        })
-
-        liveWs.on("event", async (event) => {
-            if (event.type === "session.started") {
-                console.log("GPT-Live session started:", event.session.id)
-
-                for (const audio of pendingAudio) {
-                    liveWs.send({
-                        type: "session.input_audio.append",
-                        audio,
-                    })
-                }
-
-                liveWsStarted = true
-                callContext.liveSessionId = event.session.id
-
-                pendingAudio.length = 0
-            }
-
-            if (
-                event.type === "session.output_audio.delta" &&
-                streamSid
-            ) {
-                twilioWs.send(
-                    JSON.stringify({
-                        event: "media",
-                        streamSid,
-
-                        media: {
-                            payload: event.delta,
-                        },
-                    })
                 )
             }
+        }
 
-            if (event.type === "response.event") {
-                try {
-                    await handleSidebandEvent(liveWs, event, { customerId: callContext.customerId, sessionId: callContext.liveSessionId as string })
-                } catch (error) {
-                    console.error(
-                        "Sideband message error:",
-                        error
-                    )
-                }
-            }
-
-            if (event.type === "error") {
-                console.error(
-                    "OpenAI error:",
-                    event.error
-                )
-            }
-
-            if (event.type === "session.closed") {
-                console.log("GPT-Live session closed")
-            }
+        return new Response("Not Found", {
+            status: 404,
         })
-
-        liveWs.on("error", (error) => {
-            console.log(`Error on OpenAI Websocket: ${error.message}`)
-        })
-    }
-
-    twilioWs.on("message", (message) => {
-        const event = JSON.parse(
-            message.toString()
-        ) as TwilioEvent
-
-        if (event.event === "connected") {
-            console.log("Twilio stream connected")
-        }
-
-        if (event.event === "start") {
-            streamSid = event.start.streamSid
-
-            const params = event.start.customParameters ?? {}
-
-            const callContext = {
-                callSid: event.start.callSid,
-
-                streamSid: event.start.streamSid,
-
-                callerNumber: params.callerNumber,
-
-                customerId: params.customerId || "Unknown",
-
-                customerName: params.customerName || "Unknown",
-            }
-
-            console.log("Call context:", callContext)
-
-            console.log("Twilio stream started:", streamSid)
-
-            connectToOpenAI(callContext)
-        }
-
-        if (event.event === "media") {
-
-            if (liveWsStarted && streamSid) {
-                liveWs.send({
-                    type: "session.input_audio.append",
-                    audio: event.media.payload,
-                })
-            } else {
-                pendingAudio.push(event.media.payload)
-            }
-        }
-
-        if (event.event === "stop") {
-            console.log("Twilio stream stopped")
-
-            if (liveWs) {
-                liveWs.send({
-                    type: "session.close",
-                })
-            }
-        }
-    })
-
-    twilioWs.on("error", (error) => {
-        console.log(`Twilio error: ${error.message}`)
-    })
-
-    twilioWs.on("close", () => {
-        console.log(
-            "Twilio WebSocket disconnected"
-        )
-    })
+    },
 })
 
-app.get("/", (req, res) => {
-    res.status(200).json({ message: "Okay" })
-})
-
-app.post("/voice/incoming", (req, res) => {
-    const wsUrl = PUBLIC_BASE_URL.replace(
-        /^https:/,
-        "wss:"
-    )
-
-    // const callerNumber = String(req.body.From ?? "")
-    const callSid = String(req.body.CallSid ?? "")
-
-    const callerNumber = "+91123456789"
-
-    const customer = findCustomerByPhone(callerNumber)
-
-    console.log(
-        "Incoming caller:",
-        callerNumber
-    )
-
-    console.log(
-        "Customer:",
-        customer
-    )
-
-
-    const twiml = `
-    <Response>
-      <Connect>
-        <Stream url="${wsUrl}/media-stream" >
-            <Parameter
-                name="callerNumber"
-                value="${callerNumber}"
-            />
-
-            <Parameter
-                name="callSid"
-                value="${callSid}"
-            />
-
-            <Parameter
-                name="customerId"
-                value="${customer?.id ?? ""}"
-            />
-
-            <Parameter
-                name="customerName"
-                value="${customer?.name ?? ""}"
-            />
-          </Stream>
-      </Connect>
-    </Response>
-  `
-
-    res
-        .type("text/xml")
-        .send(twiml)
-})
-
-app.post("/voice/stream-status", (req, res) => {
-    const {
-        CallSid,
-        StreamSid,
-        StreamEvent,
-        StreamError,
-    } = req.body
-
-    console.log({
-        CallSid,
-        StreamSid,
-        StreamEvent,
-        StreamError,
-    })
-
-    res.sendStatus(200)
-}
-)
-
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`)
-})
+console.log(`Backend running at http://localhost:${server.port}`)

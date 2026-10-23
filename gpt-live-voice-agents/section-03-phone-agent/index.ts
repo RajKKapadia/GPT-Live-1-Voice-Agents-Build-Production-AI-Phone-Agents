@@ -423,6 +423,10 @@ wss.on("connection", (twilioWs) => {
         }
     })
 
+    twilioWs.on("error", (error) => {
+        console.log(`Twilio error: ${error.message}`)
+    })
+
     twilioWs.on("close", () => {
         console.log(
             "Twilio WebSocket disconnected"
